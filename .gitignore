@@ -27,6 +27,15 @@ sentence-transformers/
 .env.local
 *.log
 data/pipeline.log
+run_summary.json
+
+# Office lock files created when you open an export while it is being written
+.~lock.*#
+~$*.xlsx
+
+# Test scratch DBs
+data/smoke_test.db
+data/*.db-journal
 
 # Keep DB and exports tracked so GH Actions can commit updates
 # Uncomment to keep them local-only instead:

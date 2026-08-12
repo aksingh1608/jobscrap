@@ -2,10 +2,27 @@ name: Daily Internship Scrape
 
 on:
   schedule:
-    # 07:00 Europe/Berlin ≈ 05:00 UTC in summer (CEST), 06:00 UTC in winter.
-    # Cron is UTC-only; 05:00 UTC ≈ 07:00 Berlin in summer.
-    - cron: "0 5 * * *"
+    # GitHub cron is UTC-only, so a single entry drifts an hour when Germany
+    # switches between CET and CEST. Both entries fire; the guard step below
+    # stops whichever one is not 07:00 in Berlin today.
+    - cron: "0 5 * * *"   # 07:00 Berlin in summer (CEST)
+    - cron: "0 6 * * *"   # 07:00 Berlin in winter (CET)
   workflow_dispatch:
+    inputs:
+      min_score:
+        description: "Override min_fit_score for this run"
+        required: false
+        type: string
+      notify:
+        description: "Send Telegram / email alert"
+        required: false
+        type: boolean
+        default: true
+
+# Never let two scrapes race each other onto the same branch.
+concurrency:
+  group: daily-scrape
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -13,31 +30,60 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+
+    env:
+      TZ: Europe/Berlin
 
     steps:
+      - name: Skip duplicate schedule (keep 07:00 Berlin year-round)
+        id: guard
+        run: |
+          HOUR=$(TZ=Europe/Berlin date +%H)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" != "07" ]; then
+            echo "Berlin time is ${HOUR}:00, not 07:00 — this is the off-season cron."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
+        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.guard.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install system deps (Crawl4AI / browsers optional)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxml2-dev libxslt1-dev
+      # The embedding model is ~80MB and never changes — downloading it on every
+      # run wastes a minute or two and occasionally rate-limits.
+      - name: Cache embedding model
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2-v1
 
       - name: Install Python dependencies
+        if: steps.guard.outputs.run == 'true'
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch: the default wheel pulls ~2GB of CUDA we never use.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install -r requirements.txt
           # Crawl4AI browser install is optional; skip if it fails
           crawl4ai-setup || true
 
+      # Catches code-level breakage in ~5s, before spending 20 minutes scraping.
+      - name: Smoke test
+        if: steps.guard.outputs.run == 'true'
+        run: python scripts/smoke_test.py
+
       - name: Run pipeline
+        if: steps.guard.outputs.run == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -47,16 +93,82 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
           NOTIFY_EMAIL_FROM: ${{ secrets.NOTIFY_EMAIL_FROM }}
-        run: python run_pipeline.py
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.min_score }}" ]; then
+            ARGS="$ARGS --min-score ${{ inputs.min_score }}"
+          fi
+          if [ "${{ inputs.notify }}" = "false" ]; then
+            ARGS="$ARGS --no-notify"
+          fi
+          python run_pipeline.py $ARGS --summary-json run_summary.json
+
+      - name: Write run summary
+        if: steps.guard.outputs.run == 'true' && always()
+        run: |
+          {
+            echo "### Daily internship scrape"
+            echo ""
+            if [ -f run_summary.json ]; then
+              echo '```json'
+              cat run_summary.json
+              echo '```'
+            else
+              echo "Pipeline produced no summary — see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Downloadable straight from the run page, so the sheet is reachable even
+      # if the commit step fails.
+      - name: Upload Excel artifact
+        if: steps.guard.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: internships-${{ github.run_number }}
+          path: |
+            exports/*.xlsx
+            run_summary.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Commit database and Excel
+        if: steps.guard.outputs.run == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/jobs.db exports/*.xlsx || true
+          # `git add` above stages additions; also stage exports pruned by retention
+          git add -u exports data || true
           if git diff --staged --quiet; then
             echo "No changes to commit"
-          else
-            git commit -m "chore: daily internship scrape $(date -u +%Y-%m-%d)"
-            git push
+            exit 0
+          fi
+          git commit -m "chore: daily internship scrape $(TZ=Europe/Berlin date +%Y-%m-%d)"
+          # Another run (or a manual push) may have moved the branch meanwhile.
+          for attempt in 1 2 3 4; do
+            if git push; then
+              echo "Pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "Push failed — rebasing on origin and retrying"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            sleep $((attempt * 5))
+          done
+          echo "Could not push after 4 attempts"
+          exit 1
+
+      - name: Alert on failure
+        if: failure() && steps.guard.outputs.run == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # A silent failure is indistinguishable from "no jobs today" — say so.
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -sS -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "disable_web_page_preview=true" \
+              -d "text=⚠️ Daily internship scrape FAILED. Logs: ${RUN_URL}" || true
           fi

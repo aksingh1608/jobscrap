@@ -26,9 +26,45 @@ def main() -> int:
         default=None,
         help="Path to config.yaml (default: ./config.yaml)",
     )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip Telegram / email alerts for this run",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Override min_fit_score for this run (useful when tuning)",
+    )
+    parser.add_argument(
+        "--max-per-day",
+        type=int,
+        default=None,
+        help="Override max_per_day for this run",
+    )
+    parser.add_argument(
+        "--summary-json",
+        default=None,
+        help="Also write the run summary to this file (for CI step summaries)",
+    )
     args = parser.parse_args()
-    summary = run_pipeline(args.config)
-    print(json.dumps(summary, indent=2))
+
+    overrides: dict[str, object] = {}
+    if args.min_score is not None:
+        overrides["min_fit_score"] = args.min_score
+    if args.max_per_day is not None:
+        overrides["max_per_day"] = args.max_per_day
+
+    summary = run_pipeline(
+        args.config,
+        notify=not args.no_notify,
+        overrides=overrides,
+    )
+    text = json.dumps(summary, indent=2)
+    print(text)
+    if args.summary_json:
+        Path(args.summary_json).write_text(text, encoding="utf-8")
     return 0
 
 

@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from src.config import num
 from src.http_util import get_text
 from src.models import JobRecord
 
@@ -154,12 +155,10 @@ def _scrape_one_site(site: dict[str, Any]) -> list[JobRecord]:
         listings = _parse_markdown_listings(md, url)
 
     if not listings:
-        try:
-            html = get_text(url, timeout=40)
-            listings = _parse_links_from_html(html, url, selectors)
-        except Exception:
-            log.exception("HTTP fallback failed for %s", url)
-            return []
+        # Let this propagate: the caller counts consecutive failures so a dead
+        # network stops the whole source instead of retrying every site.
+        html = get_text(url, timeout=40)
+        listings = _parse_links_from_html(html, url, selectors)
 
     # Dedup by URL within site
     seen: set[str] = set()
@@ -188,12 +187,27 @@ def collect_custom_sites(
     sites: list[dict[str, Any]],
 ) -> list[JobRecord]:
     all_jobs: list[JobRecord] = []
+    failures = 0
+    deadline = time.monotonic() + num(cfg, "custom_sites_budget_s", 900)
+
     for site in sites:
+        if time.monotonic() > deadline:
+            log.warning(
+                "Custom site budget exhausted — skipping the remaining site(s)"
+            )
+            break
+        # If nothing is reachable, the network is the problem, not the sites.
+        if failures >= 5:
+            log.error("5 custom sites failed in a row — skipping the rest this run")
+            break
         try:
             batch = _scrape_one_site(site)
             all_jobs.extend(batch)
-        except Exception:
-            log.exception("Failed custom site %s", site.get("url"))
+            failures = 0
+        except Exception as exc:
+            log.warning("Failed custom site %s: %s", site.get("url"), exc)
+            failures += 1
         time.sleep(2.0)  # polite delay between sites
+
     log.info("Custom sites total: %s", len(all_jobs))
     return all_jobs

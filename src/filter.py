@@ -1,4 +1,9 @@
-"""Hard filters: role type, domain, location, freshness, exclude words, German level."""
+"""Hard filters: role type, domain, location, freshness, exclude words, German level.
+
+Every keyword check goes through `src.textmatch` so short tokens ("ai", "ml",
+"data") match whole words only. Substring matching used to let unrelated
+postings through — "E-commerce Intern" matched "ai" inside "e-mail".
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,9 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
+from src.config import num
 from src.models import JobRecord
+from src.textmatch import any_match, contains
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +38,23 @@ GERMAN_OK_PATTERNS = [
     re.compile(r"english\s*(only|speaking|working\s*language)", re.I),
 ]
 
+# Seniority signals in the *title* are a hard no for a student role, regardless
+# of what the description mentions.
+SENIOR_TITLE = re.compile(
+    r"\b(senior|sr\.?|lead|principal|staff|head\s+of|director|manager|"
+    r"architect|chief|vp|expert|teamleiter|abteilungsleiter)\b",
+    re.I,
+)
+
+# Countries that regularly leak into "remote" postings we cannot take.
+NON_DE_ONLY = re.compile(
+    r"\b(us\s*only|usa\s*only|united\s*states\s*only|uk\s*only|india\s*only|"
+    r"canada\s*only|must\s*be\s*(located|based)\s*in\s*the\s*(us|usa|uk|india))\b",
+    re.I,
+)
+
+REMOTE_HINT = re.compile(r"\b(remote|homeoffice|home\s*office|hybrid|telearbeit)\b", re.I)
+
 
 def _parse_date(value: Optional[str]) -> Optional[date]:
     if not value:
@@ -44,56 +68,51 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
     return None
 
 
+def days_since_posted(job: JobRecord) -> Optional[int]:
+    posted = _parse_date(job.posted_date)
+    if posted is None:
+        return None
+    return max(0, (date.today() - posted).days)
+
+
 def _has_role(job: JobRecord, role_types: list[str]) -> bool:
     if job.role_type:
         return True
-    blob = f"{job.title} {job.description}".lower()
-    return any(rt.lower() in blob for rt in role_types)
+    return any_match(f"{job.title} {job.description}", role_types)
 
 
 def _has_domain(job: JobRecord, domains: list[str]) -> bool:
-    blob = f"{job.title} {job.description}".lower()
-    return any(d.lower() in blob for d in domains)
+    return any_match(f"{job.title} {job.description}", domains)
 
 
 def _location_ok(job: JobRecord, locations: list[str]) -> bool:
-    loc = (job.location or "").lower()
-    blob = f"{loc} {job.description}".lower()
-    # Remote open to Germany
-    if "remote" in blob and (
-        "germany" in blob
-        or "deutschland" in blob
-        or "eu" in blob
-        or "europe" in blob
-        or not re.search(r"\b(us|usa|uk only|india only)\b", blob)
-    ):
+    blob = f"{job.location} {job.description}"
+    if NON_DE_ONLY.search(blob):
+        return False
+    if any_match(blob, locations):
         return True
-    for allowed in locations:
-        if allowed.lower() in blob:
-            return True
-    # Default: many DE postings omit country — accept if source is DE-focused
+    if REMOTE_HINT.search(blob) and any_match(blob, ["germany", "deutschland", "europe", "eu"]):
+        return True
+    # Many German postings omit the country entirely — trust DE-only sources.
     if job.source.startswith("arbeitsagentur") or job.source.startswith("custom:"):
-        return True
-    if "jobspy" in job.source and ("germany" in blob or "deutschland" in blob or loc):
         return True
     return False
 
 
 def _fresh_enough(job: JobRecord, freshness_days: int) -> bool:
-    posted = _parse_date(job.posted_date)
-    if posted is None:
+    age = days_since_posted(job)
+    if age is None:
         # Unknown date: keep (many boards omit dates); freshness applied when known
         return True
-    cutoff = date.today() - timedelta(days=freshness_days)
-    return posted >= cutoff
+    return age <= freshness_days
 
 
 def _has_exclude(job: JobRecord, exclude_words: list[str]) -> bool:
-    blob = f"{job.title} {job.description}".lower()
-    for w in exclude_words:
-        if w.lower() in blob:
-            return True
-    return False
+    return any_match(f"{job.title} {job.description}", exclude_words)
+
+
+def is_senior_title(job: JobRecord) -> bool:
+    return bool(SENIOR_TITLE.search(job.title or ""))
 
 
 def german_requirement_too_high(job: JobRecord, german_max: str) -> bool:
@@ -128,21 +147,33 @@ def _german_too_high(job: JobRecord, german_max: str) -> bool:
 def _has_must_have(job: JobRecord, must_have_any: list[str]) -> bool:
     if not must_have_any:
         return True
-    blob = f"{job.title} {job.description}".lower()
-    return any(m.lower() in blob for m in must_have_any)
+    return any_match(f"{job.title} {job.description}", must_have_any)
+
+
+def _thin_description(job: JobRecord, min_chars: int) -> bool:
+    """Listing-page links with no real text cannot be judged — drop them.
+
+    Applies only to custom sites, where we scrape link text rather than a
+    posting body. Board APIs sometimes legitimately return short descriptions.
+    """
+    if not job.source.startswith("custom:"):
+        return False
+    return len(job.description or "") < min_chars
 
 
 def filter_jobs(jobs: list[JobRecord], cfg: dict[str, Any]) -> list[JobRecord]:
     role_types = cfg.get("role_types") or []
     domains = cfg.get("domains") or []
     locations = cfg.get("locations") or []
-    freshness = int(cfg.get("freshness_days") or 7)
+    freshness = int(num(cfg, "freshness_days", 7))
     exclude = cfg.get("exclude_words") or []
     must_have = cfg.get("must_have_any") or []
     german_max = cfg.get("german_max_level") or "A2"
+    min_desc = int(num(cfg, "min_description_chars", 0))
 
     counts = {
         "input": len(jobs),
+        "senior": 0,
         "role": 0,
         "domain": 0,
         "location": 0,
@@ -150,11 +181,15 @@ def filter_jobs(jobs: list[JobRecord], cfg: dict[str, Any]) -> list[JobRecord]:
         "exclude": 0,
         "german": 0,
         "must_have": 0,
+        "thin": 0,
         "passed": 0,
     }
     kept: list[JobRecord] = []
 
     for job in jobs:
+        if is_senior_title(job):
+            counts["senior"] += 1
+            continue
         if not _has_role(job, role_types):
             counts["role"] += 1
             continue
@@ -176,13 +211,17 @@ def filter_jobs(jobs: list[JobRecord], cfg: dict[str, Any]) -> list[JobRecord]:
         if not _has_must_have(job, must_have):
             counts["must_have"] += 1
             continue
+        if _thin_description(job, min_desc):
+            counts["thin"] += 1
+            continue
         kept.append(job)
         counts["passed"] += 1
 
     log.info(
-        "Filter drop-off — input=%s | fail role=%s domain=%s location=%s "
-        "freshness=%s exclude=%s german=%s must_have=%s | passed=%s",
+        "Filter drop-off — input=%s | fail senior=%s role=%s domain=%s location=%s "
+        "freshness=%s exclude=%s german=%s must_have=%s thin=%s | passed=%s",
         counts["input"],
+        counts["senior"],
         counts["role"],
         counts["domain"],
         counts["location"],
@@ -190,6 +229,15 @@ def filter_jobs(jobs: list[JobRecord], cfg: dict[str, Any]) -> list[JobRecord]:
         counts["exclude"],
         counts["german"],
         counts["must_have"],
+        counts["thin"],
         counts["passed"],
     )
     return kept
+
+
+__all__ = [
+    "filter_jobs",
+    "german_requirement_too_high",
+    "is_senior_title",
+    "days_since_posted",
+]
