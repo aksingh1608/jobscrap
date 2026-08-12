@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.python-version
+
+# Models / caches
+.cache/
+*.pt
+*.bin
+sentence-transformers/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local secrets / logs
+.env.local
+*.log
+data/pipeline.log
+
+# Keep DB and exports tracked so GH Actions can commit updates
+# Uncomment to keep them local-only instead:
+# data/*.db
+# exports/*.xlsx
+
+# Crawl4AI / browser caches
+.crawl4ai/
+browser_profile/

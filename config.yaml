@@ -1,0 +1,167 @@
+# =============================================================================
+# Daily Internship Job Aggregator — main settings
+# Edit this file to steer filters, ranking, and sources. No code changes needed.
+# =============================================================================
+
+role_types:
+  - internship
+  - praktikum
+  - praktikant
+  - werkstudent
+  - working student
+  - research assistant
+  - studentische hilfskraft
+  - hiwi
+  - shk
+
+domains:
+  - machine learning
+  - deep learning
+  - data science
+  - data analysis
+  - computer vision
+  - nlp
+  - llm
+  - generative ai
+  - mlops
+  - devops
+  - ai research
+  - ai engineering
+
+# At least one of these must appear in title or description
+must_have_any:
+  - python
+  - ml
+  - ai
+  - data
+  - machine learning
+  - deep learning
+  - nlp
+  - llm
+  - computer vision
+
+exclude_words:
+  - senior
+  - lead
+  - permanent
+  - unbefristet
+  - "full time manager"
+  - director
+  - principal
+  - staff engineer
+  - 5+ years
+  - 3+ years experience
+
+# Reject postings that require German above this CEFR level
+german_max_level: A2
+prefer_english: true
+
+locations:
+  - Germany
+  - Remote
+  - Berlin
+  - München
+  - Munich
+  - Hamburg
+  - Köln
+  - Cologne
+  - Frankfurt
+  - Stuttgart
+  - Düsseldorf
+  - Deutschland
+
+radius_km: 200
+freshness_days: 7
+min_fit_score: 45
+max_per_day: 50
+
+# Primary search location for JobSpy / Arbeitsagentur queries
+search_location: Berlin
+search_queries:
+  - machine learning internship
+  - deep learning praktikum
+  - data science werkstudent
+  - AI internship
+  - NLP internship
+  - computer vision internship
+  - MLOps internship
+  - research assistant AI
+  - studentische hilfskraft machine learning
+
+sources:
+  # JobSpy boards — do NOT include linkedin (handled manually)
+  jobspy:
+    - indeed
+    - glassdoor
+    - google
+    # zip_recruiter has limited DE coverage; enable if useful
+    # - zip_recruiter
+  arbeitsagentur: true
+  # Plug-in list: add/remove URLs here only. Optional per-site overrides:
+  #   - url: https://example.com/jobs
+  #     name: Example
+  #     enabled: true
+  custom_sites:
+    - url: https://www.stellenwerk.de/en/
+      name: Stellenwerk
+      enabled: true
+    - url: https://englishjobs.de/in/berlin
+      name: English Jobs
+      enabled: true
+    - url: https://www.work-in-berlin.eu/jobs/english
+      name: Work in Berlin EU
+      enabled: true
+    - url: https://www.jobmensa.de/studentenjobs/berlin
+      name: JobMensa
+      enabled: true
+    - url: https://www.youngcapital.de/jobs/berlin
+      name: Young Capital
+      enabled: true
+    - url: https://www.thelocal.de/jobs
+      name: The Local
+      enabled: true
+    - url: https://berlinstartupjobs.com
+      name: Berlin Startup Jobs
+      enabled: true
+    - url: https://www.stepstone.de/en
+      name: StepStone
+      enabled: true
+    - url: https://www.studentjob.de
+      name: Student Job
+      enabled: true
+    - url: https://www.make-it-in-germany.com/en/
+      name: Make it in Germany
+      enabled: false
+    - url: https://eures.ec.europa.eu/index_en
+      name: EURES
+      enabled: false
+
+# Paste your CV summary / profile here — used for embedding fit score
+profile_text: >
+  Master's student in Artificial Intelligence in Berlin, Germany.
+  Strong in Machine Learning, Deep Learning, NLP, LLMs, Computer Vision,
+  Data Science, Python, PyTorch, TensorFlow, MLOps basics.
+  Looking for Internship, Praktikum, Werkstudent, or Research Assistant /
+  HiWi roles in AI, ML, data, or DevOps. German level A2; prefer English
+  working language. Available in Berlin or remote within Germany.
+
+# --- Scoring weights (also documented in src/rank.py) ---
+# fit ≈ cosine_similarity * embedding_weight + boosts − penalties (clamped 0–100)
+scoring:
+  embedding_weight: 100      # cosine similarity (0–1) → points
+  english_boost: 5           # +points if English is working language
+  must_have_boost: 3         # +points per must_have keyword found (capped)
+  must_have_boost_cap: 12
+  german_penalty: 20         # -points if German required above A2
+  exclude_penalty: 15        # -points if soft exclude signals remain
+
+paths:
+  sqlite: data/jobs.db
+  exports_dir: exports
+  log_file: data/pipeline.log
+
+notify:
+  # Set secrets via env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+  # or SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, NOTIFY_EMAIL_TO
+  telegram: true
+  email: false
