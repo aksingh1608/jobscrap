@@ -17,10 +17,26 @@ import time
 from typing import Any, Optional
 from urllib.parse import urlencode
 
-from src.http_util import get_json
+from src.config import num
+from src.http_util import CircuitBreaker, get_json
 from src.models import JobRecord
+from src.textmatch import any_match
 
 log = logging.getLogger(__name__)
+
+# Titles that clearly have nothing to do with a student AI/ML role are skipped
+# before the per-job detail request. Each detail fetch costs a round trip plus a
+# rate-limit sleep, so this is the difference between a 5-minute and a
+# 40-minute run.
+TITLE_HINTS = [
+    "praktikum", "praktikant", "praktikantin", "werkstudent", "werkstudentin",
+    "internship", "intern", "trainee", "hiwi", "shk", "hilfskraft",
+    "working student", "studentische", "student", "abschlussarbeit",
+    "masterarbeit", "bachelorarbeit", "thesis", "research assistant",
+    "machine learning", "deep learning", "data science", "data scientist",
+    "künstliche intelligenz", "ki", "ai", "nlp", "llm", "computer vision",
+    "mlops", "devops", "data engineer", "data analyst", "python",
+]
 
 BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 SEARCH_URL = f"{BASE}/pc/v6/jobs"
@@ -78,8 +94,8 @@ def _posted_from_item(item: dict[str, Any], detail: Optional[dict[str, Any]]) ->
 
 def collect_arbeitsagentur(cfg: dict[str, Any]) -> list[JobRecord]:
     location = cfg.get("search_location") or "Berlin"
-    radius = int(cfg.get("radius_km") or 200)
-    freshness = int(cfg.get("freshness_days") or 7)
+    radius = int(num(cfg, "radius_km", 200))
+    freshness = int(num(cfg, "freshness_days", 7))
     queries = cfg.get("search_queries") or ["Machine Learning"]
     # German role keywords for better coverage on this board
     de_extra = [
@@ -96,13 +112,16 @@ def collect_arbeitsagentur(cfg: dict[str, Any]) -> list[JobRecord]:
 
     jobs: list[JobRecord] = []
     seen_refs: set[str] = set()
-    max_raw = 200
+    skipped_titles = 0
+    max_raw = int(num(cfg, "max_raw_per_source", 200))
+
+    breaker = CircuitBreaker("Arbeitsagentur", threshold=3)
 
     for q in all_queries:
-        if len(jobs) >= max_raw:
+        if len(jobs) >= max_raw or not breaker:
             break
         page = 1
-        while page <= 4 and len(jobs) < max_raw:
+        while page <= 4 and len(jobs) < max_raw and breaker:
             params: dict[str, Any] = {
                 "was": q,
                 "wo": location,
@@ -119,8 +138,12 @@ def collect_arbeitsagentur(cfg: dict[str, Any]) -> list[JobRecord]:
             try:
                 log.info("Arbeitsagentur search: %s", urlencode(params))
                 data = get_json(SEARCH_URL, headers=API_HEADERS, params=params)
-            except Exception:
-                log.exception("Arbeitsagentur search failed page=%s q=%r", page, q)
+                breaker.record_success()
+            except Exception as exc:
+                log.warning(
+                    "Arbeitsagentur search failed page=%s q=%r: %s", page, q, exc
+                )
+                breaker.record_failure()
                 break
 
             stellen = (
@@ -154,6 +177,10 @@ def collect_arbeitsagentur(cfg: dict[str, Any]) -> list[JobRecord]:
                 if isinstance(company, dict):
                     company = company.get("name") or ""
                 loc = _location_from_item(item, location)
+
+                if not any_match(str(title), TITLE_HINTS):
+                    skipped_titles += 1
+                    continue
 
                 detail = _fetch_detail(str(refnr))
                 time.sleep(0.4)  # keep request rate low
@@ -206,5 +233,9 @@ def collect_arbeitsagentur(cfg: dict[str, Any]) -> list[JobRecord]:
             page += 1
             time.sleep(1.0)
 
-    log.info("Arbeitsagentur collected %s jobs", len(jobs))
+    log.info(
+        "Arbeitsagentur collected %s jobs (%s skipped on title before detail fetch)",
+        len(jobs),
+        skipped_titles,
+    )
     return jobs

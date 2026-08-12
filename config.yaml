@@ -72,11 +72,35 @@ locations:
 
 radius_km: 200
 freshness_days: 7
-min_fit_score: 45
+min_fit_score: 55
 max_per_day: 50
+# Never send an empty sheet: if fewer than min_results clear min_fit_score,
+# top up with the next best down to floor_fit_score (0 disables the top-up).
+min_results: 15
+# Hard line: below this a posting is not worth your time, so the top-up above
+# will never reach for it. Off-domain "intern" roles land around 40–45 on this
+# scale, so keep the floor above that.
+floor_fit_score: 50
+
+# Custom-site links with less text than this are listing-page noise, not jobs.
+min_description_chars: 60
+# Ceiling on raw postings pulled from any single source per run
+max_raw_per_source: 200
+
+# Time budgets, so a hanging or dead board can never overrun the daily schedule.
+# A source that fails repeatedly is dropped for the rest of the run.
+collect_budget_s: 2400       # whole collect stage (40 min)
+custom_sites_budget_s: 900   # custom sites only (15 min)
+
+retention:
+  expire_days: 21      # unseen for this many days → retired from the sheet
+  db_keep_days: 180    # delete expired rows older than this
+  keep_exports: 30     # keep only the newest N dated .xlsx files
 
 # Primary search location for JobSpy / Arbeitsagentur queries
 search_location: Berlin
+# Mixed English + German phrasing: German boards index the German wording, and
+# a Werkstudent role is rarely advertised as an "internship".
 search_queries:
   - machine learning internship
   - deep learning praktikum
@@ -87,6 +111,15 @@ search_queries:
   - MLOps internship
   - research assistant AI
   - studentische hilfskraft machine learning
+  - werkstudent machine learning
+  - werkstudent data science
+  - praktikum künstliche intelligenz
+  - praktikum data science
+  - LLM internship
+  - generative AI internship
+  - data analyst werkstudent
+  - python internship
+  - master thesis machine learning
 
 sources:
   # JobSpy boards — do NOT include linkedin (handled manually)
@@ -146,14 +179,20 @@ profile_text: >
   working language. Available in Berlin or remote within Germany.
 
 # --- Scoring weights (also documented in src/rank.py) ---
-# fit ≈ cosine_similarity * embedding_weight + boosts − penalties (clamped 0–100)
+# Each signal scores 0–1, then fit = 100 * weighted_average − penalties.
+# Weights are relative: doubling all of them changes nothing.
 scoring:
-  embedding_weight: 100      # cosine similarity (0–1) → points
-  english_boost: 5           # +points if English is working language
-  must_have_boost: 3         # +points per must_have keyword found (capped)
-  must_have_boost_cap: 12
+  semantic: 35               # embedding similarity vs profile_text
+  role: 25                   # internship / Werkstudent / HiWi match (title > body)
+  domain: 25                 # ML / AI / data match (title > body)
+  recency: 8                 # newer posting → higher
+  language: 7                # English working language
   german_penalty: 20         # -points if German required above A2
   exclude_penalty: 15        # -points if soft exclude signals remain
+  # Cosine range used to rescale similarity. MiniLM rarely exceeds ~0.6 even on
+  # a perfect match, so a raw score would bunch everything into 30–60.
+  sim_floor: 0.15
+  sim_ceil: 0.60
 
 paths:
   sqlite: data/jobs.db
@@ -165,3 +204,6 @@ notify:
   # or SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, NOTIFY_EMAIL_TO
   telegram: true
   email: false
+  top_n: 10              # how many jobs to list in the daily message
+  attach_excel: false    # email only — attach the dated workbook
+  skip_when_empty: false # true = stay silent on days with no new matches

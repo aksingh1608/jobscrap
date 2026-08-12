@@ -23,7 +23,8 @@ class JobRecord:
     fit_score: float = 0.0
     fit_reason: str = ""
     first_seen: Optional[str] = None
-    status: str = "new"  # new | applied | dismissed
+    last_seen: Optional[str] = None
+    status: str = "new"  # new | applied | dismissed | expired
     id: Optional[int] = None
     # Internal / raw helpers (not always persisted)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -46,6 +47,7 @@ class JobRecord:
             "fit_score": self.fit_score,
             "fit_reason": self.fit_reason,
             "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
             "status": self.status,
         }
 
@@ -69,8 +71,12 @@ class JobRecord:
             fit_score=float(data.get("fit_score") or 0),
             fit_reason=data.get("fit_reason") or "",
             first_seen=data.get("first_seen"),
+            last_seen=data.get("last_seen"),
             status=data.get("status") or "new",
         )
+
+    def is_new_today(self) -> bool:
+        return bool(self.first_seen) and self.first_seen == today_iso()
 
     def as_dict(self) -> dict[str, Any]:
         d = asdict(self)

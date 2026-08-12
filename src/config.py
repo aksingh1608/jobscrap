@@ -11,6 +11,22 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = ROOT / "config.yaml"
 
 
+def num(cfg: dict[str, Any], key: str, default: float) -> float:
+    """Read a numeric setting, treating 0 as a real value.
+
+    `cfg.get(key) or default` silently swallows zero, so `min_fit_score: 0`
+    or `--min-score 0` used to fall back to the default instead of disabling
+    the threshold. Only None / missing / unparseable falls back here.
+    """
+    value = cfg.get(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
     if not cfg_path.is_absolute():
@@ -28,8 +44,18 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     cfg.setdefault("locations", ["Germany", "Remote"])
     cfg.setdefault("radius_km", 200)
     cfg.setdefault("freshness_days", 7)
-    cfg.setdefault("min_fit_score", 45)
+    cfg.setdefault("min_fit_score", 55)
     cfg.setdefault("max_per_day", 50)
+    cfg.setdefault("min_results", 15)
+    cfg.setdefault("floor_fit_score", 50)
+    cfg.setdefault("min_description_chars", 60)
+    cfg.setdefault("max_raw_per_source", 200)
+    cfg.setdefault("collect_budget_s", 2400)
+    cfg.setdefault("custom_sites_budget_s", 900)
+    cfg.setdefault(
+        "retention",
+        {"expire_days": 21, "db_keep_days": 180, "keep_exports": 30},
+    )
     cfg.setdefault("search_location", "Berlin")
     cfg.setdefault("search_queries", ["AI internship"])
     cfg.setdefault("sources", {})
@@ -40,10 +66,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     cfg.setdefault(
         "scoring",
         {
-            "embedding_weight": 100,
-            "english_boost": 5,
-            "must_have_boost": 3,
-            "must_have_boost_cap": 12,
+            "semantic": 35,
+            "role": 25,
+            "domain": 25,
+            "recency": 8,
+            "language": 7,
             "german_penalty": 20,
             "exclude_penalty": 15,
         },
@@ -56,7 +83,16 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             "log_file": "data/pipeline.log",
         },
     )
-    cfg.setdefault("notify", {"telegram": True, "email": False})
+    cfg.setdefault(
+        "notify",
+        {
+            "telegram": True,
+            "email": False,
+            "top_n": 10,
+            "attach_excel": False,
+            "skip_when_empty": False,
+        },
+    )
 
     # Resolve relative paths against project root
     for key in ("sqlite", "exports_dir", "log_file"):
